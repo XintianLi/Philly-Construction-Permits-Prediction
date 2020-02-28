@@ -1,0 +1,336 @@
+---
+title: "Musa507 Final Project: Forcast New Construction Permits in Philadelphia"
+author: "Jingzhi Chang & Xintian Li"
+date: "12/19/2019"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 5
+    toc_float: true
+    theme: united
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,results = TRUE, message=FALSE, warning=FALSE,fig.align = "center",cache=F)#,cache.lazy = FALSE
+options(scipen=99)
+```
+
+```{r library_theme,include=FALSE}
+library(tidyverse)
+library(sf)
+library(viridis)
+library(caret)
+library(spatstat)
+library(spdep)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(gganimate)
+library(plotROC)
+library(pROC)
+
+
+mapTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle=element_text(face="italic"),
+    plot.caption=element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2)
+  )
+}
+```
+
+
+
+## 1. Motivations
+
+   On which part of a city will new construction and redevelopment occurs in the near future? This is a question the local government really cares about when selecting sites for affordable houses. Most affordable houses are now located in remote areas with little pubic transit accessibility and are lack of job opportunities, infrastructure, enducation service and medical care. Therefore, the underrepresented groups who live there could not get enough support they deserve. Building affordable houses in places having strong potential for future redevelopment could ensure better service and infrastructure for those in need after the renewal happened. In a word, if the future process of gentrification could be fully understood, the government could build affordable houses in advance at proper locations with lower cost and better future vision.
+
+   In this study, we design an app for the government to predict the locaions of future new construtions in the Philadelphia county. There is a [YouTube Video for the App](https://youtu.be/nSpuQJcPw4c). This analysis is meaningful and duplicatable for the public sector because all the data we collect is from open data sources like Annual Census Survey and OpenDataPhilly. Also, our model will provide both accuracy and generalizability for similar cases in other areas. In the following sections we will introduce the data we use and do some exploratory anlysis. The data-driven method will be specified in the Section 3. 
+
+![](cnt.jpg)  
+
+## 2. Exploratory Analysis 
+
+  In this study, we will use the permits data from 2010 to 2017 from [OpenDataPhilly](https://www.opendataphilly.org/dataset/licenses-and-inspections-building-permits/resource/617f4add-053e-4a56-81f9-134f641692f2) to build a machine learning model and predict the spatial distribution of new construction permits accross the Philadelphia city for a specific future year. 
+  
+### 2.1 Spatial and temperal autocorrelation of permit data
+
+First, let's take a look at the characteritics of the permit data we want to predict. After exploring the permit data, we find an obvious spatial and temperal autocorrelation. In other words, the number of permits in a certain area in a certain year is associated with the number of permits of its neighbors and the number of permits in previous years.
+  
+  - The new permits tend to appear near the old ones and the distribution is spatially expanding.
+  - The distribution of the permits tend to be more concentrated in central city areas and more dispersed in other areas.
+
+As can be seen from the animation below:
+
+![Animation: the proliferating of the New Constructions Through the year, Philadelphia, PA](x.gif)
+
+```{r}
+load("DataCleaning_Final.RData")
+```
+
+### 2.2 Analysis Unit and permit distribution
+
+  In this study, we choose to use the 500m fishnet as our analysis unit. Because the census tracts are too general to capture the spatial sprawl of the permits through the years. Also, to provide enough precision for future decision making, We need to predict with more accuracy the locations where the permits will be issued. In addition, we should consider the cost of computing large dataset and the reproducibility of the model in other cases. Therefore, after adjustment, we decide to use 500 meters fishnet as our analysis unit.
+```{r}
+# change the colors add x y labs
+ggplot()+geom_sf(data=subset(f1,f1$Year.x==2017),aes(fill=permitCount))
+```
+  
+  
+
+After aggregating the permit dataset to the fishnet level, we discover that the distribution of the permit counts in each fishnet cell is statistically overdispersed with the variance much larger than the mean value. Also, the dataset is very imbalanced with more than ten thousand 0 value and only 16% other values. The overdispersed and imbalanced dataset may affect the efficiency of our predicting model. Therefore, the characteristics of the aggregated data should be considered when selecting prediting model and the data should recatogrized before using in the model.
+
+```{r distribution,fig.width=5,fig.height=5}
+ggplot()+geom_histogram(data = f1,aes(x=permitCount),binwidth = 5,fill="#22226D")+labs(title = "Distribution of Permit Count")
+table(f1$permitCount)
+f1$permitCat <- case_when(f1$permitCount>1&f1$permitCount<10~"1-10",
+                        TRUE~"kk")
+# plot a categorical bar chart or a table to see the distribution
+```
+
+
+### 2.3 Feature Engineering 
+
+  Then we perform feature engineering to select which independent variables to use when predicting the new construction permits. We mainly take the variables into consideration from three aspects:
+
+1).spatial and temperal lag
+As is shown in the animation above, there are strong spatial and temperal correlation between the adjacent fishnets. Therefore, we calculate the number of nearest neighbours who have permits and the total number of permits they have last year. Also, we list the number of permits the fishnet had itself last year. We believe these information will have strong predicting intelligence in the model.
+
+2).the demographic and economic characteristics of the census tract that the fishnet cell belongs to
+Additionally, we take into consideration the conditions of census tracts  which the fishnets fall in, Although these data are from a larger geographic scale, they are very detailed. We believe these data can also have impact on whether new construction permits will happen in the fishnets.
+
+3).the average property status of the property density in the fishnet cell
+Lastly, the average conditions of the properties in the fishnet will be considered. For instance, the density, the average built year, the average market value and the average total livable area.
+
+<style>
+.superbigimage{
+overflow:scroll;
+width: 1000px;
+height:1000px;
+white-space: nowrap;
+}
+
+.superbigimage img{
+max-width: none;
+}
+
+</style>
+<div class="superbigimage">
+```{r exploratory analysis, fig.height=15,fig.width=12}
+
+# ff <- f1%>%st_set_geometry(NULL)%>%
+#dplyr::select(-fshntID,-NAME,-Year_x,-Totl_Pp,-Whit_Pp,-Med_Age,-Totl_Hs,-Vcnt_Hs,-Bachelr,-Poverty,-Owner,-Renter,-Med_Ern,-P_Poor,-P_Rent,-P_Bchlr,-Tractar,-Year_y,-Month,-Date,-extrr_c,-frontag,-intrr_c,-unitprc,-unitprc)
+ff <- f1%>%st_set_geometry(NULL) %>% 
+  dplyr::select(Med_Inc,Percent_White,P_Vacant,Pop_dens,number_of_rooms,
+                market_value,sale_price,total_area,total_livable_area,year_built,
+                propCount,permitCount,nei_per,nei_cnt,last_yr_self)
+
+names(ff)[3] <- "Percent_Vacant"
+names(ff)[13] <- "Neighbor_Permits"
+names(ff)[14] <- "Neighbor_Count"
+ff.long <- ff %>%
+    gather(Variable, Value, -permitCount)
+
+ff.cor <-
+  ff.long %>%
+    group_by(Variable) %>%
+    summarize(correlation = cor(Value, permitCount, use = "complete.obs"))
+    
+ggplot(ff.long, aes(Value, permitCount)) +
+  geom_point(size = 0.1) +
+  geom_text(data = ff.cor, aes(label = paste("r =", round(correlation, 2))),colour="black",
+            x=-Inf, y=Inf, vjust = 1, hjust = -.1) +
+  geom_smooth(method = "lm", se = FALSE, colour = "#ED1250") +
+  facet_wrap(~Variable, ncol = 3, scales = "free") +
+  labs(title = "Permit count as a function of factors")
+
+```
+</div>
+
+## 3 Model and Cross Validation
+
+### 3.1 Model Selection
+
+The permit data are count data and contain a large proportion of 0. It is obvious that OLS is not suitable for the regression and log transformation will lose the information of zeros. At first we tried to use poisson model. However, the variation of the data is much higher than the mean and poisson model cannot fit very well. 
+Based on the distribution of the permits, the binomial regression is rather acceptable. Also, considering the relatively small analysis unit of our fishnets (500 m * 500 m), it's more useful to see "whether permits will be issued here" instead of "how many permits will be issued".
+
+Here comes our model, a binomial logit model based on one-year fishnets. This model include the demographical, housing, permit information, and permit information of neighbors last year of each fishnet. The result of logit model is the probability of each fishnet to contain a permit in the given year. If there are permits in the fishnet, then the variable "perm" is 1, otherwise "perm" is 0. We first use Year 2017 as the test set and former years (2011-2016) as the training set.
+
+```{r our_model}
+load("DataCleaning_Final.RData")
+palette4 <- c("#22226D","#FFF6DA","#FBC99D","#ED1250")
+f1$perm <- ifelse(f1$permitCount>0,1,0)
+f1$nei_cnt <- as.factor(f1$nei_cnt)
+f1 <- f1 %>% as.data.frame() %>% dplyr::select(-NAME,-permitCount)
+f_old <- subset(f1,f1$Year.x!=2017)
+f_new <- subset(f1,f1$Year.x==2017)
+
+reg <- glm(perm~.,data=dplyr::select(f_old,-fishnetID,-geometry),family="binomial" (link="logit"))
+ModelResult <- data.frame(Outcome = as.factor(f_new$perm),
+                          Probs = predict(reg, f_new, type= "response"),
+                          geometry=f_new$geometry,TestYear= 2017)
+```
+Below is the density plot of the probability. We can see that probability results of fishnets without permits are mainly distributed under 15%. The probability results of those containing permits are more dispersed. There are two small peaks of the with-permit distribution, one close to 10% and the other close to 95%. Since we aim at finding the most probable place of future gentrification, we think this model is useful enough to find the location.
+
+```{r density}
+#Density
+ggplot(ModelResult, aes(x = Probs, fill = as.factor(Outcome))) + 
+  geom_density() +
+  facet_grid(Outcome ~ .) +
+  scale_fill_manual(values = c("#22226D","#ED1250"))+
+  labs(x = "New Permits", y = "Density of probabilities",
+       title = "Distribution of predicted probabilities by observed outcome") +
+  theme(strip.text.x = element_text(size = 18),
+        legend.position = "none")
+```
+The ROC curve of our model is way above Coin Flip line but not a perfect overfit one, which means that the model is effective in prediction.
+```{r ROC}
+#ROC
+ggplot(ModelResult, aes(d = as.numeric(ModelResult$Outcome), m = Probs)) +
+  geom_roc(n.cuts = 50, labels = FALSE, colour = "#ED1250") +
+  style_roc(theme = theme_grey) +
+  geom_abline(slope = 1, intercept = 0, size = 1.5, color = 'grey') +
+  labs(title = "ROC Curve - Permission Model")
+
+```
+From the density plot and the ROC curve, we know more information of the model. As we would like to only find the most potential part for redevelopment, we are willing to trade sensitivity for specificity. In other words, we are cautious to assert a place to be potential (i.e. likely to have permits in the future). Therefore, we set the threshold 0.72, which is higher than usual. In this way, we can say that the areas we predicted as potential are very probable for future development. According to the confusion Matrix, the sensitivity of this model is 35% and the specificity is over 99%
+  ```{r threshold_and_result}
+ModelResult <- 
+  ModelResult %>%
+  mutate(predOutcome  = as.factor(ifelse(ModelResult$Probs > 0.72 , 1, 0)))
+ModelResult$Real_Predict <- (ModelResult$Outcome:ModelResult$predOutcome)
+
+caret::confusionMatrix(ModelResult$predOutcome, ModelResult$Outcome, 
+                       positive = "1")
+result <- st_as_sf(ModelResult,crs=4326,agr="constant")
+```
+This plot shows in red the predicted and real potential places for development in 2017 in spatial context. We can see that the model is useful to detect the dense redevelopment areas surrounding the city center and in the northwest.
+```{r result_plot_2017}
+ggplot()+
+  geom_sf(data=result,mapping = aes(fill=Real_Predict))+
+  labs(title = "Real and Predicted Results for 2017")+
+  scale_fill_manual(values=palette4)
+
+```
+
+### 3.2 Cross Validation
+
+After that, we do cross validation. First, we do the k-fold cross validation which randomly leaves out a certain number of fishnets regardless of the year of the fishnet. The result is shown below. The mean sensitivity of this cross validation is about 37%, and the mean specificity is about 98.8%
+  ```{r cross validation}
+ctrl <- trainControl(method = "cv", number = 100, classProbs=TRUE, summaryFunction=twoClassSummary)
+
+f1$permfactor <- as.factor(ifelse(f1$perm==0,"Yes","No"))
+cvFit <- train(permfactor ~ ., data = dplyr::select(f1,-fishnetID,-perm,-geometry), 
+               method="glm", family="binomial",
+               metric="ROC", trControl = ctrl)
+
+cvFit
+
+```
+As is shown in the following plot, the sensitivity metric is distributed widely around the mean while the ROC and specificity metrics are distributed tightly around the mean. According to the plot, our model generalizes very well with respect to specificity - the rate it correctly predicts no permits. The model does not generalize as well with respect to sensitivity - the rate it correctly predicts the fishnet with permit. It is understandable because there are only a small fraction of fishnets without permits so the train sets may occasionally contain too few of them. In addition, the default threshold in this cross validation is lower than our setting, which can also affect the model result. 
+```{r cvplot}
+dplyr::select(cvFit$resample, -Resample) %>%
+  gather(metric, value) %>%
+  left_join(gather(cvFit$results[2:4], metric, mean)) %>%
+  ggplot(aes(value)) + 
+  geom_histogram(bins=100, fill = palette4[1]) +
+  facet_wrap(~metric) +
+  geom_vline(aes(xintercept = mean), colour = palette4[4], linetype = 3, size = 1.5) +
+  scale_x_continuous(limits = c(0, 1)) +
+  labs(x="Goodness of Fit", y="Count", title="CV Goodness of Fit Metrics",
+       subtitle = "Across-fold mean reprented as dotted lines")
+```
+After that, we do time cross validation as well, which means that we leave out every single year and test the model fit.
+```{r cv_every_year}
+for(year in (2011:2016)){
+  f_train <- subset(f1,f1$Year.x!=year)
+  f_test <- subset(f1,f1$Year.x==year)
+  reg.cv <- glm(perm~.,data=dplyr::select(f_train,-fishnetID,-geometry,-permfactor),family="binomial" (link="logit"))
+  
+  tmp <- data.frame(Outcome = as.factor(f_test$perm),
+                    Probs = predict(reg.cv, f_test, type= "response"),
+                    geometry=f_test$geometry,TestYear=year)
+  tmp <- 
+    tmp %>%
+    mutate(predOutcome  = as.factor(ifelse(tmp$Probs > 0.72 , 1, 0)))
+  tmp$Real_Predict <- (tmp$Outcome:tmp$predOutcome)
+  
+  conf <- caret::confusionMatrix(tmp$predOutcome, tmp$Outcome, 
+                                 positive = "1")
+  ModelResult <- rbind(ModelResult,tmp)
+}
+```
+
+From the ROC curves and the real outcome and prediction plot for each test year, we can say that our model is roughly stable and generalizable over time. The cross validation over time shows a better result than the random k-fold one. This is probably because this cross validation guarantees the train sets to contain enough fishnets with permits.
+```{r every_year_ROC}
+#cv_ROC
+ggplot(ModelResult, aes(d = as.numeric(ModelResult$Outcome), m = Probs)) +
+  geom_roc(n.cuts = 50, labels = FALSE, colour = "#ED1250",pointsize = 0.3) +
+  style_roc(theme = theme_grey) +
+  geom_abline(slope = 1, intercept = 0, size = 1.5, color = 'grey') +
+  labs(title = "ROC Curve - Permission Model for Different Test Year")+
+  facet_wrap(~TestYear,nrow = 2)+
+  theme(axis.text.x = element_text(size=6))
+```
+
+<style>
+.superbigimage{
+overflow:scroll;
+width: 1000px;
+height:1000px;
+white-space: nowrap;
+}
+
+.superbigimage img{
+max-width: none;
+}
+
+
+</style>
+
+<div class="superbigimage">
+```{r every_year_plot,fig.height=7,fig.width=15}
+result <- st_as_sf(ModelResult,crs=4326,agr="constant")
+t <- ggplot()+
+  geom_sf(data=result,mapping = aes(fill=Real_Predict))+
+  scale_fill_manual(values=palette4)+
+  labs(title = "Real and Predicted Results for Different Test Year")+
+  facet_wrap(~TestYear,nrow=2)+
+  theme(axis.text.x=element_text(hjust=0.5,size=8),
+        axis.text.y=element_text(hjust=0.5,size=8))
+t
+```
+
+## 4. Conclusion and Further Steps
+In this project, we are trying to help the government finding places to build affordable houses in the future. These places should be potential for future redevelopment so that those living in these houses will soon have better access to various facilities. We believe that the trend of new construction permits will represent the potential of redevelopment in the future. Therefore, we build model to detect the probable areas for new construction in a few years.
+
+Based on past experience and feature engineering, we find the new construction permits are related with demographic of local residents and housing or property factors. Moreover, the issuing of new construction permits is temporally and spatially autocorrelated. We put these factor in our binomial -logit model.
+
+This model is quite useful to find out the areas mostly likely to have new construction permits. As a result, these areas are suitable as locations of affordable houses. Hopefully, the model will be helpful for making life more convenient for people who will live in affordable houses. 
+
+However, the model still has some shortcomings. First of all, this model ignored the density of permits. We will treat all areas with permits the same, regardless of whether it contains 1 permit or 70 permits in the model. Second, the permits are clustered in a small fraction of area. This model does not predict very well outside the clusters. Third, issuing new construction permits is associated with a lot of factors that are hard to measure, including the willingness of developers or the special situation of the parcel. This model is not able to take these factors into account. 
+
+In further study, we could possibly improve this model in several ways. First, we might try to figure out some covert factors that influence new construction permit. For example, although we believe that the permits are spatially expanding, many areas near highly developed neighbors do not tend to have new permits (shown in the figure below).
+```{r conclu}
+f1 <- st_as_sf(f1,crs=4326,agr="constant")
+f1$nei_cnt <- as.numeric(as.character(f1$nei_cnt))
+weird <- subset(f1,f1$perm==0&f1$nei_cnt>2&f1$nei_per>30)
+ggplot()+
+  geom_sf(data=f1)+
+  geom_sf(data=weird,fill="#ED1250")+
+  labs(title = "In sharp contrast with neighbors")
+```
+We have not yet found out why this is the case but we think this indicates some other variables should be included in this table. In addition, we might also use other types of model, such as zero-inflated model or multinomial logit model to get a better fit.  It is worthwhile to do further study for this case as it is beneficial to the public welfare.
+
+
